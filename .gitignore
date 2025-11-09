@@ -1,0 +1,8 @@
+outputs/
+grpo_trainer_lora_model/
+unsloth_compiled_cache/
+unsloth_training_checkpoints/
+.venv/
+data.duckdb
+__marimo__/
+uv.lock

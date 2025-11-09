@@ -69,6 +69,7 @@ dependencies = [
     "llguidance==0.7.30",
     "llvmlite==0.44.0",
     "lm-format-enforcer==0.11.3",
+    "marimo[sql]>=0.17.7",
     "markdown-it-py==4.0.0",
     "markupsafe==2.1.5",
     "mdurl==0.1.2",

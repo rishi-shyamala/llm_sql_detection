@@ -126,7 +126,7 @@ def main() -> None:
 
     max_seq_length = 2048
     lora_rank = 8
-    load_in_4bit = args.load_in_4bit
+    load_in_4bit = True
     gpu_memory_utilization = 0.75 
     conservativeness = 0.5
     model, tokenizer = FastLanguageModel.from_pretrained(
@@ -134,6 +134,7 @@ def main() -> None:
         max_seq_length=max_seq_length,
         load_in_4bit=load_in_4bit,
         fast_inference=True,
+        use_flash_attention_2=True,
         max_lora_rank=lora_rank,
         full_finetuning=False,
         gpu_memory_utilization=gpu_memory_utilization,
