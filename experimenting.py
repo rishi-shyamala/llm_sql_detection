@@ -185,10 +185,41 @@ def _(con, ids2017, mo):
     _df = mo.sql(
         f"""
         SELECT label, count(*) FROM ids2017 group by label
-
         """,
         engine=con
     )
+    return
+
+
+@app.cell
+def _():
+    import unsloth
+    from unsloth import FastLanguageModel
+    import torch
+
+    model, tokenizer = FastLanguageModel.from_pretrained(
+        model_name = "unsloth/Qwen3-4B-Instruct-2507",
+        max_seq_length = 2048, # Choose any for long context!
+        load_in_4bit = True,  # 4 bit quantization to reduce memory
+        full_finetuning = False, # [NEW!] We have full finetuning now!
+        # token = "hf_...", # use one if using gated models
+    )
+    return (tokenizer,)
+
+
+@app.cell
+def _(tokenizer):
+    from unsloth.chat_templates import get_chat_template
+    tokenizer2 = get_chat_template(
+        tokenizer,
+        chat_template = "qwen3-instruct",
+    )
+    return (tokenizer2,)
+
+
+@app.cell
+def _(tokenizer2):
+    tokenizer2.get_chat_template()
     return
 
 

@@ -6,3 +6,4 @@ unsloth_training_checkpoints/
 data.duckdb
 __marimo__/
 uv.lock
+src/__pycache__
