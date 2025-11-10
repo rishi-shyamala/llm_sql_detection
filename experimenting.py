@@ -43,7 +43,7 @@ def _(con):
             f2 = ((1 + (beta**2)) * precision * recall) / ((beta*precision) + recall) if (precision+recall > 0) else 0.0
             return {'output': output_map, 'tp':tp, 'fp':fp, 'tn':tn, 'fn':fn, 'precision':precision, 'recall':recall, 'f1':f1, 'f2':f2/(perfect)} 
         except Exception as e:
-            return {'output': None, 'tp':0, 'fp':0, 'tn':0, 'fn':0, 'precision':0, 'recall':0, 'f1':-20, 'f2':-20} 
+            return {'output': None, 'tp':0, 'fp':0, 'tn':0, 'fn':0, 'precision':0, 'recall':0, 'f1':-20, 'f2':-20, 'error':e} 
     return (evaluate,)
 
 
@@ -144,6 +144,48 @@ def _(con, ids2017, mo):
     _df = mo.sql(
         f"""
         select label, count(*) as count from ids2017 group by label
+        """,
+        engine=con
+    )
+    return
+
+
+@app.cell
+def _():
+    import pandas as pd
+
+    csv_path = 'evaluation/evaluation_test.csv'
+    df = pd.read_csv(csv_path)
+    #new_query = evaluate(con, test_query, 'Label', 'SSH-Patator', 5897, 3117165)
+    return (df,)
+
+
+@app.cell
+def _(df):
+    for q, w in df.iterrows():
+        print(w)
+    return
+
+
+@app.cell
+def _(con, df, evaluate):
+    for r, c in df.iterrows():
+        current_query = c['Output']
+        current_value = c['Attack Type']
+        current_target_value = c['Expected Rows']
+        current_total_rows = c['Total Rows']
+        current_label = c['Column']
+        print('---------QUERY', r, '---------')
+        print(evaluate(con, current_query, current_label, current_value, current_target_value, current_total_rows))
+    return
+
+
+@app.cell
+def _(con, ids2017, mo):
+    _df = mo.sql(
+        f"""
+        SELECT label, count(*) FROM ids2017 group by label
+
         """,
         engine=con
     )

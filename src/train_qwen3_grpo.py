@@ -36,6 +36,16 @@ def parse_args() -> argparse.Namespace:
         help="Directory where GRPO checkpoints and logs are stored.",
     )
     parser.add_argument(
+        "--base-model",
+        default="unsloth/Qwen3-4B-Instruct-2507-unsloth-bnb-4bit",
+        help="Huggingface format name of the base model to use",
+    )
+    parser.add_argument(
+        "--seed",
+        default=3407,
+        help="Seed to use for the model tuning",
+    )
+    parser.add_argument(
         "--lora-output",
         default="grpo_saved_lora",
         help="Path to save the trained LoRA adapter.",
@@ -92,8 +102,7 @@ def init_run_logging(run_dir: Path):
 
 
 def record_run_arguments(
-    run_dir: Path, args: argparse.Namespace, extra: dict | None = None
-) -> None:
+    run_dir: Path, args: argparse.Namespace, extra: dict | None = None) -> None:
     metadata = {
         "command": " ".join(sys.argv),
         "args": vars(args),
@@ -104,7 +113,215 @@ def record_run_arguments(
     with open(run_dir / "run_args.json", "w", encoding="utf-8") as handle:
         json.dump(metadata, handle, indent=2, default=str)
 
+def format_dataset(row: pd.Series) -> list[dict[str, str]]:
+    reasoning_start = "<start_working_out>"
+    reasoning_end = "<end_working_out>"
+    solution_start = "<SOLUTION>"
+    solution_end = "</SOLUTION>"
+    system_prompt = (
+        "You are given a problem.\n"
+        "Think about the problem and provide your working out.\n"
+        f"Place it between {reasoning_start} and {reasoning_end}.\n"
+        f"Then, provide your solution between {solution_start}{solution_end}"
+    )
 
+    expected_answer = row["expected_answer"]
+    problem = row["problem"]
+    thoughts = row["generated_solution"].replace("<think>", "").replace("</think>", "")
+    thoughts = thoughts.strip()
+    final_prompt = (
+        reasoning_start
+        + thoughts
+        + reasoning_end
+        + solution_start
+        + expected_answer
+        + solution_end
+    )
+    return [
+        {"role": "system", "content": system_prompt},
+        {"role": "user", "content": problem},
+        {"role": "assistant", "content": final_prompt},
+    ]
+
+def match_format_exactly(completions,  **kwargs):
+    scores = []
+    reasoning_start = "<start_working_out>"
+    reasoning_end = "<end_working_out>"
+    solution_start = "<SOLUTION>"
+    solution_end = "</SOLUTION>"
+    eos_token = ""
+    solution_end_regex = r"</SOLUTION>[\s]{0,}" + (f"(?:{re.escape(eos_token)})?" if eos_token else "")
+
+    match_format = re.compile(
+        rf"{reasoning_end}.*?"
+        rf"{solution_start}(.+?){solution_end_regex}"
+        rf"[\s]{{0,}}$",
+        flags=re.MULTILINE | re.DOTALL,
+    )
+    for completion in completions:
+        score = 0
+        response = completion[0]["content"]
+        if match_format.search(response) is not None:
+            score += 3.0
+        scores.append(score)
+    return scores
+
+def match_format_approximately(completions,  **kwargs):
+    scores = []
+    easoning_start = "<start_working_out>"
+    reasoning_end = "<end_working_out>"
+    solution_start = "<SOLUTION>"
+    solution_end = "</SOLUTION>"
+    eos_token = ""
+    solution_end_regex = r"</SOLUTION>[\s]{0,}" + (f"(?:{re.escape(eos_token)})?" if eos_token else "")
+    match_format = re.compile(
+    rf"{reasoning_end}.*?"
+    rf"{solution_start}(.+?){solution_end_regex}"
+    rf"[\s]{{0,}}$",
+    flags=re.MULTILINE | re.DOTALL,
+    )
+    reasoning_start = "<start_working_out>"
+    reasoning_end = "<end_working_out>"
+    solution_start = "<SOLUTION>"
+    solution_end = "</SOLUTION>"
+    for completion in completions:
+        score = 0
+        response = completion[0]["content"]
+        score += 0.5 if response.count(reasoning_end) == 1 else -1.0
+        score += 0.5 if response.count(solution_start) == 1 else -1.0
+        score += 0.5 if response.count(solution_end) == 1 else -1.0
+        scores.append(score)
+    return scores
+
+def check_answer(prompts, completions, answer, **kwargs):
+    easoning_start = "<start_working_out>"
+    reasoning_end = "<end_working_out>"
+    solution_start = "<SOLUTION>"
+    solution_end = "</SOLUTION>"
+    eos_token = ""
+    solution_end_regex = r"</SOLUTION>[\s]{0,}" + (f"(?:{re.escape(eos_token)})?" if eos_token else "")
+    match_format = re.compile(
+        rf"{reasoning_end}.*?"
+        rf"{solution_start}(.+?){solution_end_regex}"
+        rf"[\s]{{0,}}$",
+        flags=re.MULTILINE | re.DOTALL,
+    )
+    responses = [completion[0]["content"] for completion in completions]
+    extracted_responses = [
+        guess.group(1) if (guess := match_format.search(r)) is not None else None
+        for r in responses
+    ]
+    scores = []
+    for guess, true_answer in zip(extracted_responses, answer):
+        score = 0
+        if guess is None:
+            scores.append(-2.0)
+            continue
+        if guess == true_answer:
+            score += 5.0
+        elif guess.strip() == true_answer.strip():
+            score += 3.5
+        else:
+            try:
+                ratio = float(guess) / float(true_answer)
+                if 0.9 <= ratio <= 1.1:
+                    score += 2.0
+                elif 0.8 <= ratio <= 1.2:
+                    score += 1.5
+                else:
+                    score -= 2.5
+            except Exception:
+                score -= 4.5
+        scores.append(score)
+    return scores
+
+def extract_hash_answer(text: str) -> str:
+    return text
+
+def check_numbers(prompts, completions, answer, **kwargs):
+    question = prompts[0][-1]["content"]
+    solution_start = "<SOLUTION>"
+    match_numbers = re.compile(
+        solution_start + r".*?[\s]{0,}([-]?[\d\.\,]{1,})",
+        flags=re.MULTILINE | re.DOTALL,
+    )
+    responses = [completion[0]["content"] for completion in completions]
+    extracted_responses = [
+        guess.group(1) if (guess := match_numbers.search(r)) is not None else None
+        for r in responses
+    ]
+    # if print_state["times"] % print_every == 0:
+    #     print(
+    #         "*" * 20
+    #         + f"Question:\n{question}\nAnswer:\n{answer[0]}\nResponse:\n{responses[0]}\nExtracted:\n{extracted_responses[0]}"
+    #     )
+    # print_state["times"] += 1
+
+    scores = []
+    for guess, true_answer in zip(extracted_responses, answer):
+        if guess is None:
+            scores.append(-2.5)
+            continue
+        try:
+            true_answer_val = float(true_answer.strip())
+            guess_val = float(guess.strip().replace(",", ""))
+            scores.append(3.5 if guess_val == true_answer_val else -1.5)
+        except Exception:
+            scores.append(0)
+    return scores
+
+def evaluate_model(eval_data, tokenizer, max_completion_length, model, lora_request=None):
+    if eval_data is None or len(eval_data) == 0:
+        return None
+    samples = [eval_data[i] for i in range(len(eval_data))]
+    prompts_messages = [sample["prompt"] for sample in samples]
+    answers = [sample["answer"] for sample in samples]
+    prompt_texts = [
+        tokenizer.apply_chat_template(messages, add_generation_prompt=True, tokenize=False)
+        for messages in prompts_messages
+    ]
+    eval_sampling_params = SamplingParams(
+        temperature=1.0,
+        top_k=50,
+        max_tokens=max_completion_length,
+    )
+    outputs = model.fast_generate(
+        prompt_texts,
+        sampling_params=eval_sampling_params,
+        lora_request=lora_request,
+    )
+    completions_text = [item.outputs[0].text for item in outputs]
+
+    reward_lists = {
+        "match_format_exactly": [],
+        "match_format_approximately": [],
+        "check_answer": [],
+        "check_numbers": [],
+        "total_reward": [],
+    }
+
+    for prompt, answer, completion in zip(prompts_messages, answers, completions_text):
+        completion_struct = [[{"content": completion}]]
+        prompt_struct = [prompt]
+        answer_struct = [answer]
+        mf_exact = match_format_exactly(completion_struct)[0]
+        mf_approx = match_format_approximately(completion_struct)[0]
+        ans_score = check_answer(prompt_struct, completion_struct, answer_struct)[0]
+        num_score = check_numbers(prompt_struct, completion_struct, answer_struct)[0]
+        total = mf_exact + mf_approx + ans_score + num_score
+        reward_lists["match_format_exactly"].append(mf_exact)
+        reward_lists["match_format_approximately"].append(mf_approx)
+        reward_lists["check_answer"].append(ans_score)
+        reward_lists["check_numbers"].append(num_score)
+        reward_lists["total_reward"].append(total)
+
+    summary = {
+        "sample_count": len(samples),
+        "averages": {k: float(np.mean(v)) for k, v in reward_lists.items()},
+        "all_scores": reward_lists,
+    }
+    return summary
+    
 def main() -> None:
     args = parse_args()
     device = "cuda" if torch.cuda.is_available() else "cpu"
@@ -130,7 +347,7 @@ def main() -> None:
     gpu_memory_utilization = 0.75 
     conservativeness = 0.5
     model, tokenizer = FastLanguageModel.from_pretrained(
-        model_name="unsloth/Qwen3-4B-Instruct-2507-unsloth-bnb-4bit",
+        model_name=args.base_model,
         max_seq_length=max_seq_length,
         load_in_4bit=load_in_4bit,
         fast_inference=True,
@@ -155,7 +372,7 @@ def main() -> None:
         ],
         lora_alpha=lora_rank * 2,
         use_gradient_checkpointing="unsloth",
-        random_state=3407,
+        random_state=args.seed,
     )
 
     reasoning_start = "<start_working_out>"
@@ -189,25 +406,6 @@ def main() -> None:
         "{% endif %}"
     )
     tokenizer.chat_template = chat_template
-
-    def format_dataset(row: pd.Series) -> list[dict[str, str]]:
-        expected_answer = row["expected_answer"]
-        problem = row["problem"]
-        thoughts = row["generated_solution"].replace("<think>", "").replace("</think>", "")
-        thoughts = thoughts.strip()
-        final_prompt = (
-            reasoning_start
-            + thoughts
-            + reasoning_end
-            + solution_start
-            + expected_answer
-            + solution_end
-        )
-        return [
-            {"role": "system", "content": system_prompt},
-            {"role": "user", "content": problem},
-            {"role": "assistant", "content": final_prompt},
-        ]
 
     dataset_df = load_dataset("unsloth/OpenMathReasoning-mini", split="cot").to_pandas()[
         ["expected_answer", "problem", "generated_solution"]
@@ -244,7 +442,7 @@ def main() -> None:
             optim="adamw_8bit",
             weight_decay=0.001,
             lr_scheduler_type="linear",
-            seed=3407,
+            seed=args.seed,
             report_to="none",
             max_steps=100 if args.smoke_test else 10000,
             gradient_checkpointing=True
@@ -272,8 +470,6 @@ def main() -> None:
     if args.smoke_test:
         dataset = dataset.select(range(min(len(dataset), 100)))
 
-    def extract_hash_answer(text: str) -> str:
-        return text
 
     dataset = dataset.map(
         lambda x: {
@@ -294,56 +490,6 @@ def main() -> None:
         flags=re.MULTILINE | re.DOTALL,
     )
 
-    def match_format_exactly(completions, **kwargs):
-        scores = []
-        for completion in completions:
-            score = 0
-            response = completion[0]["content"]
-            if match_format.search(response) is not None:
-                score += 3.0
-            scores.append(score)
-        return scores
-
-    def match_format_approximately(completions, **kwargs):
-        scores = []
-        for completion in completions:
-            score = 0
-            response = completion[0]["content"]
-            score += 0.5 if response.count(reasoning_end) == 1 else -1.0
-            score += 0.5 if response.count(solution_start) == 1 else -1.0
-            score += 0.5 if response.count(solution_end) == 1 else -1.0
-            scores.append(score)
-        return scores
-
-    def check_answer(prompts, completions, answer, **kwargs):
-        responses = [completion[0]["content"] for completion in completions]
-        extracted_responses = [
-            guess.group(1) if (guess := match_format.search(r)) is not None else None
-            for r in responses
-        ]
-        scores = []
-        for guess, true_answer in zip(extracted_responses, answer):
-            score = 0
-            if guess is None:
-                scores.append(-2.0)
-                continue
-            if guess == true_answer:
-                score += 5.0
-            elif guess.strip() == true_answer.strip():
-                score += 3.5
-            else:
-                try:
-                    ratio = float(guess) / float(true_answer)
-                    if 0.9 <= ratio <= 1.1:
-                        score += 2.0
-                    elif 0.8 <= ratio <= 1.2:
-                        score += 1.5
-                    else:
-                        score -= 2.5
-                except Exception:
-                    score -= 4.5
-            scores.append(score)
-        return scores
 
     match_numbers = re.compile(
         solution_start + r".*?[\s]{0,}([-]?[\d\.\,]{1,})",
@@ -351,33 +497,6 @@ def main() -> None:
     )
     print_state = {"times": 0}
     print_every = 1 if args.smoke_test else 5
-
-    def check_numbers(prompts, completions, answer, **kwargs):
-        question = prompts[0][-1]["content"]
-        responses = [completion[0]["content"] for completion in completions]
-        extracted_responses = [
-            guess.group(1) if (guess := match_numbers.search(r)) is not None else None
-            for r in responses
-        ]
-        if print_state["times"] % print_every == 0:
-            print(
-                "*" * 20
-                + f"Question:\n{question}\nAnswer:\n{answer[0]}\nResponse:\n{responses[0]}\nExtracted:\n{extracted_responses[0]}"
-            )
-        print_state["times"] += 1
-
-        scores = []
-        for guess, true_answer in zip(extracted_responses, answer):
-            if guess is None:
-                scores.append(-2.5)
-                continue
-            try:
-                true_answer_val = float(true_answer.strip())
-                guess_val = float(guess.strip().replace(",", ""))
-                scores.append(3.5 if guess_val == true_answer_val else -1.5)
-            except Exception:
-                scores.append(0)
-        return scores
 
     def tokenize_prompt(batch):
         prompts = batch["prompt"]
@@ -398,7 +517,7 @@ def main() -> None:
     eval_dataset = dataset.select(range(eval_sample_count)) if eval_sample_count else None
 
     max_prompt_length = maximum_length + 1
-    max_completion_length = 1024#max_seq_length - max_prompt_length
+    max_completion_length = 2048#max_seq_length - max_prompt_length
     # if args.smoke_test:
     #     max_completion_length = min(max_completion_length, 64)
 
@@ -406,7 +525,7 @@ def main() -> None:
         min_p=0.1,
         top_p=1.0,
         top_k=-1,
-        seed=3407,
+        seed=args.seed,
         stop=[tokenizer.eos_token],
         include_stop_str_in_output=True,
     )
@@ -434,59 +553,7 @@ def main() -> None:
         output_dir=str(trainer_output_dir),
     )
 
-    def evaluate_model(eval_data, lora_request=None):
-        if eval_data is None or len(eval_data) == 0:
-            return None
-        samples = [eval_data[i] for i in range(len(eval_data))]
-        prompts_messages = [sample["prompt"] for sample in samples]
-        answers = [sample["answer"] for sample in samples]
-        prompt_texts = [
-            tokenizer.apply_chat_template(messages, add_generation_prompt=True, tokenize=False)
-            for messages in prompts_messages
-        ]
-        eval_sampling_params = SamplingParams(
-            temperature=1.0,
-            top_k=50,
-            max_tokens=max_completion_length,
-        )
-        outputs = model.fast_generate(
-            prompt_texts,
-            sampling_params=eval_sampling_params,
-            lora_request=lora_request,
-        )
-        completions_text = [item.outputs[0].text for item in outputs]
-
-        reward_lists = {
-            "match_format_exactly": [],
-            "match_format_approximately": [],
-            "check_answer": [],
-            "check_numbers": [],
-            "total_reward": [],
-        }
-
-        for prompt, answer, completion in zip(prompts_messages, answers, completions_text):
-            completion_struct = [[{"content": completion}]]
-            prompt_struct = [prompt]
-            answer_struct = [answer]
-            mf_exact = match_format_exactly(completion_struct)[0]
-            mf_approx = match_format_approximately(completion_struct)[0]
-            ans_score = check_answer(prompt_struct, completion_struct, answer_struct)[0]
-            num_score = check_numbers(prompt_struct, completion_struct, answer_struct)[0]
-            total = mf_exact + mf_approx + ans_score + num_score
-            reward_lists["match_format_exactly"].append(mf_exact)
-            reward_lists["match_format_approximately"].append(mf_approx)
-            reward_lists["check_answer"].append(ans_score)
-            reward_lists["check_numbers"].append(num_score)
-            reward_lists["total_reward"].append(total)
-
-        summary = {
-            "sample_count": len(samples),
-            "averages": {k: float(np.mean(v)) for k, v in reward_lists.items()},
-            "all_scores": reward_lists,
-        }
-        return summary
-
-    initial_evaluation = evaluate_model(eval_dataset, lora_request=None)
+    initial_evaluation = evaluate_model(eval_dataset, tokenizer, max_completion_length, model, lora_request=None)
 
     trainer = GRPOTrainer(
         model=model,
@@ -536,13 +603,13 @@ def main() -> None:
     )
     lora_output = model.fast_generate(
         [chat_text],
-        sampling_params=SamplingParams(temperature=1.0, top_k=50, max_tokens=2048),
+        sampling_params=SamplingParams(temperature=0.9, top_k=50, max_tokens=2048),
         lora_request=model.load_lora(str(lora_output_path)),
     )[0].outputs[0].text
     print("LoRA output:", lora_output)
 
     final_evaluation = evaluate_model(
-        eval_dataset, lora_request=model.load_lora(str(lora_output_path))
+        eval_dataset, tokenizer, max_completion_length, model, lora_request=model.load_lora(str(lora_output_path))
     )
 
     generation_file = run_dir / "generation_outputs.txt"
