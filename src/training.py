@@ -53,6 +53,7 @@ def parse_args() -> argparse.Namespace:
     )
     parser.add_argument(
         "--seed",
+        type=int,
         default=3407,
         help="Seed to use for the model tuning",
     )
@@ -75,6 +76,46 @@ def parse_args() -> argparse.Namespace:
         "--duckdb-db-path",
         default="../data/data.duckdb",
         help="Path to the DuckDB database file used by evaluation.py.",
+    )
+    parser.add_argument(
+        "--sft-max-steps",
+        type=int,
+        default=25000,
+        help="Max steps for the sft stage",
+    )
+    parser.add_argument(
+        "--sft-save-steps",
+        type=int,
+        default=500,
+        help="How often (in steps) to save SFT checkpoints. Defaults to 500.",
+    )
+    parser.add_argument(
+        "--grpo-save-steps",
+        type=int,
+        default=100,
+        help="How often (in steps) to save GRPO checkpoints. Defaults to 100.",
+    )
+    parser.add_argument(
+        "--grpo-max-steps",
+        type=int,
+        default=500,
+        help="Max steps for the grpo stage",
+    )
+    parser.add_argument(
+        "--resume-grpo-from-checkpoint",
+        default=None,
+        help=(
+            "Path to a previous GRPO Trainer checkpoint directory to resume from "
+            "(e.g. .../trainer_outputs/checkpoint-50)."
+        ),
+    )
+    parser.add_argument(
+        "--resume-sft-from-checkpoint",
+        default=None,
+        help=(
+            "Path to a previous SFT checkpoint directory to resume SFT from "
+            "(e.g. .../sft_outputs/checkpoint-500)."
+        ),
     )
     return parser.parse_args()
 
@@ -157,6 +198,7 @@ def format_sft_example(row: pd.Series) -> list[dict[str, str]]:
         {"role": "assistant", "content": row["query"].strip()},
     ]
 
+
 def build_sft_dataset(tokenizer, max_seq_length: int, smoke_test: bool) -> Dataset:
     """Load and format the SFT dataset from motherduckdb/duckdb-text2sql-25k."""
     ds = load_dataset("motherduckdb/duckdb-text2sql-25k", split="train")
@@ -179,6 +221,7 @@ def build_sft_dataset(tokenizer, max_seq_length: int, smoke_test: bool) -> Datas
     )
     sft_dataset = Dataset.from_pandas(filtered_df, preserve_index=False)
     return sft_dataset
+
 
 def sql_reward(
     prompts,
@@ -211,6 +254,7 @@ def sql_reward(
             # If anything goes wrong, fall back to a strong negative reward.
             scores.append(-20.0)
     return scores
+
 
 def evaluate_model(
     eval_data: Dataset,
@@ -290,6 +334,7 @@ def evaluate_model(
         "all_scores": detailed_scores,
     }
     return summary
+
 
 def build_grpo_dataset(
     tokenizer,
@@ -397,6 +442,10 @@ def main() -> None:
 
     run_dir = prepare_run_directory(Path(args.output_dir))
     log_file, original_stdout, original_stderr = init_run_logging(run_dir)
+    
+    sft_output_dir = run_dir / "sft_outputs"
+    sft_output_dir.mkdir(parents=True, exist_ok=True)
+    
     trainer_output_dir = run_dir / "trainer_outputs"
     lora_output_path = run_dir / Path(args.lora_output).name
     trainer_output_dir.mkdir(parents=True, exist_ok=True)
@@ -404,6 +453,7 @@ def main() -> None:
         run_dir,
         args,
         extra={
+            "sft_output_dir": str(sft_output_dir),
             "trainer_output_dir": str(trainer_output_dir),
             "lora_output_dir": str(lora_output_path),
         },
@@ -413,7 +463,7 @@ def main() -> None:
     SQL_DUCKDB_CONN = duckdb.connect(args.duckdb_db_path)
     evaluation_module.con = SQL_DUCKDB_CONN
 
-    max_seq_length = 2048
+    max_seq_length = 4096
     lora_rank = 8
     load_in_4bit = True
     gpu_memory_utilization = 0.75 
@@ -496,11 +546,20 @@ def main() -> None:
             lr_scheduler_type="linear",
             seed=args.seed,
             report_to="none",
-            max_steps=100 if args.smoke_test else 10000,
+            output_dir=str(sft_output_dir),
+            max_steps=100 if args.smoke_test else args.sft_max_steps,
+            save_steps=args.sft_save_steps,
             gradient_checkpointing=True,
         ),
     )
-    sft_trainer.train()
+    if args.resume_sft_from_checkpoint:
+        print(
+            f"Resuming SFT training from checkpoint: "
+            f"{args.resume_sft_from_checkpoint}"
+        )
+        sft_trainer.train(resume_from_checkpoint=args.resume_sft_from_checkpoint)
+    else:
+        sft_trainer.train()
 
     # Quick sanity generation after SFT
     example_messages = sft_dataset[0]["Messages"][:2]
@@ -511,8 +570,8 @@ def main() -> None:
     )
     _ = model.generate(
         **tokenizer(demo_text, return_tensors="pt").to(device),
-        temperature=0,
-        max_new_tokens=256,
+        temperature=0.7,
+        max_new_tokens=1024,
         streamer=TextStreamer(tokenizer, skip_prompt=False),
     )
 
@@ -531,49 +590,59 @@ def main() -> None:
     )
 
     max_prompt_length = maximum_length + 1
-    max_completion_length = 512
+    max_completion_length = 1024
 
     vllm_sampling_params = SamplingParams(
-        min_p=0.1,
-        top_p=1.0,
-        top_k=-1,
+        min_p=0,
+        top_p=0.8,
+        top_k=20,
+        temperature=0.7,
         seed=args.seed,
         stop=[tokenizer.eos_token],
         include_stop_str_in_output=True,
     )
 
-    num_generations = 2 if args.smoke_test else 4
-    max_steps = 5 if args.smoke_test else 100
-
+    num_generations = 2 if args.smoke_test else 6
+    max_steps = 5 if args.smoke_test else args.grpo_max_steps
+    save_steps = args.grpo_save_steps
     training_args = GRPOConfig(
         vllm_sampling_params=vllm_sampling_params,
-        temperature=1.0,
+        temperature=0.7,
         learning_rate=5e-6,
         weight_decay=0.001,
         warmup_ratio=0.1,
         lr_scheduler_type="linear",
         optim="adamw_8bit",
-        logging_steps=1,
+        logging_steps=20,
         per_device_train_batch_size=1,
         gradient_accumulation_steps=1,
         num_generations=num_generations,
         max_prompt_length=max_prompt_length,
         max_completion_length=max_completion_length,
         max_steps=max_steps,
-        save_steps=max_steps,
+        save_steps=save_steps,
         report_to="none",
         output_dir=str(trainer_output_dir),
     )
 
-    print("Running initial evaluation before GRPO ...")
-    initial_evaluation = evaluate_model(
-        eval_dataset,
-        tokenizer,
-        max_completion_length,
-        model,
-        duckdb_conn=SQL_DUCKDB_CONN,
-        lora_request=None,
-    )
+    if args.resume_grpo_from_checkpoint:
+        print(
+            f"Resume-from-checkpoint specified "
+            f"({args.resume_grpo_from_checkpoint}); skipping initial pre-GRPO evaluation."
+        )
+        initial_evaluation = None
+    else:
+        print("Running initial evaluation before GRPO ...")
+        initial_evaluation = evaluate_model(
+            eval_dataset,
+            tokenizer,
+            max_completion_length,
+            model,
+            duckdb_conn=SQL_DUCKDB_CONN,
+            lora_request=None,
+        )
+
+
 
     grpo_trainer = GRPOTrainer(
         model=model,
@@ -582,7 +651,11 @@ def main() -> None:
         args=training_args,
         train_dataset=grpo_dataset,
     )
-    grpo_trainer.train()
+    if args.resume_grpo_from_checkpoint:
+        print(f"Resuming GRPO training from checkpoint: {args.resume_grpo_from_checkpoint}")
+        grpo_trainer.train(resume_from_checkpoint=args.resume_grpo_from_checkpoint)
+    else:
+        grpo_trainer.train()
 
 
     # -----------------------
