@@ -7,3 +7,5 @@ data.duckdb
 __marimo__/
 uv.lock
 src/__pycache__
+llama.cpp
+models/

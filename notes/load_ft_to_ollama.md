@@ -13,7 +13,7 @@
 ```
 FROM ./Qwen3-4B-merged-Q4_K_M.gguf
 SYSTEM "You are given a problem. Think about the problem and provide your working out. Place it between <start_working_out> and <end_working_out>. Then, provide your solution between <SOLUTION></SOLUTION>"
-TEMPLATE TEMPLATE """
+TEMPLATE """
 {{- if .Messages }}
   {{- range .Messages }}
 {{ .Content }}

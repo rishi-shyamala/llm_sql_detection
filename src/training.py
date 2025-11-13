@@ -36,7 +36,8 @@ SQL_DUCKDB_CONN = None
 
 SYSTEM_PROMPT = (
     "You are an expert DuckDB SQL assistant.\n"
-    "Take the user request, problem background, and SQL context and return a DuckDB-compatible SQL query.\n"
+    "Take the user request, problem background, and SQL context and return a DuckDB-compatible SQL query.\n" 
+    "Use any DuckDB clauses, functions, aggregations, or joins needed to make the best query possible\n"
 )
 
 def parse_args() -> argparse.Namespace:
@@ -201,8 +202,88 @@ def format_sft_example(row: pd.Series) -> list[dict[str, str]]:
 
 def build_sft_dataset(tokenizer, max_seq_length: int, smoke_test: bool) -> Dataset:
     """Load and format the SFT dataset from motherduckdb/duckdb-text2sql-25k."""
+    keep_categories = [
+        "guides/sql_features/asof_join",
+        "guides/sql_features/full_text_search",
+        "sql/aggregates",
+        "sql/case_sensitivity",
+        "sql/configuration",
+        "sql/constraints",
+        "sql/data_types/bitstring",
+        "sql/data_types/blob",
+        "sql/data_types/boolean",
+        "sql/data_types/date",
+        "sql/data_types/enum",
+        "sql/data_types/interval",
+        "sql/data_types/list",
+        "sql/data_types/map",
+        "sql/data_types/nulls",
+        "sql/data_types/numeric",
+        "sql/data_types/overview",
+        "sql/data_types/struct",
+        "sql/data_types/text",
+        "sql/data_types/time",
+        "sql/data_types/timestamp",
+        "sql/data_types/timezones",
+        "sql/data_types/union",
+        "sql/duckdb_table_functions",
+        "sql/expressions/case",
+        "sql/expressions/cast",
+        "sql/expressions/collations",
+        "sql/expressions/comparison_operators",
+        "sql/expressions/in",
+        "sql/expressions/logical_operators",
+        "sql/expressions/overview",
+        "sql/expressions/star",
+        "sql/expressions/subqueries",
+        "sql/functions/bitstring",
+        "sql/functions/blob",
+        "sql/functions/char",
+        "sql/functions/date",
+        "sql/functions/dateformat",
+        "sql/functions/datepart",
+        "sql/functions/enum",
+        "sql/functions/interval",
+        "sql/functions/nested",
+        "sql/functions/numeric",
+        "sql/functions/overview",
+        "sql/functions/patternmatching",
+        "sql/functions/time",
+        "sql/functions/timestamp",
+        "sql/functions/timestamptz",
+        "sql/functions/utility",
+        "sql/indexes",
+        "sql/information_schema",
+        "sql/introduction",
+        "sql/query_syntax/filter",
+        "sql/query_syntax/from",
+        "sql/query_syntax/groupby",
+        "sql/query_syntax/grouping_sets",
+        "sql/query_syntax/having",
+        "sql/query_syntax/limit",
+        "sql/query_syntax/orderby",
+        "sql/query_syntax/qualify",
+        "sql/query_syntax/sample",
+        "sql/query_syntax/select",
+        "sql/query_syntax/setops",
+        "sql/query_syntax/unnest",
+        "sql/query_syntax/values",
+        "sql/query_syntax/where",
+        "sql/query_syntax/window",
+        "sql/query_syntax/with",
+        "sql/samples",
+        "sql/statements/create_macro",
+        "sql/statements/create_schema",
+        "sql/statements/create_sequence",
+        "sql/statements/pivot",
+        "sql/statements/select",
+        "sql/statements/unpivot",
+        "sql/window_functions"
+    ]
     ds = load_dataset("motherduckdb/duckdb-text2sql-25k", split="train")
-    df = ds.to_pandas()[["prompt", "query", "schema"]]
+    df_temp = ds.to_pandas()
+    keep_filter = df_temp.category.isin(keep_categories)
+    df = df_temp[keep_filter][["prompt", "query", "schema"]]
 
     if smoke_test:
         df = df.head(512).copy()
@@ -500,7 +581,8 @@ def main() -> None:
 
     SYSTEM_PROMPT = (
         "You are an expert DuckDB SQL assistant.\n"
-        "Take the user request, problem background, and SQL context and return a DuckDB-compatible SQL query.\n"
+        "Take the user request, problem background, and SQL context and return a DuckDB-compatible SQL query.\n" 
+        "Use any DuckDB clauses, functions, aggregations, or joins needed to make the best query possible\n"
     )
 
     chat_template = (
