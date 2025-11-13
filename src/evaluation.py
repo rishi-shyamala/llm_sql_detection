@@ -4,6 +4,8 @@ import pandas as pd
 def evaluate(conn, query, column, value, target_score, total_rows):
     if column.lower() in query.lower() and value.lower() in query.lower():
         return {'output': None, 'tp':0, 'fp':0, 'tn':0, 'fn':0, 'precision':0, 'recall':0, 'f1':-5, 'f2':-5} 
+    elif value.lower() in query.lower():
+        return {'output': None, 'tp':0, 'fp':0, 'tn':0, 'fn':0, 'precision':0, 'recall':0, 'f1':-2, 'f2':-2} 
     count_query = f'with target_query as ({query.rstrip(';')}) select {column}, count(*) as count from target_query group by {column}'
     try:
         output = con.sql(count_query).fetchall()
@@ -23,7 +25,12 @@ def evaluate(conn, query, column, value, target_score, total_rows):
         beta = 1.5
         perfect = 1.3
         f2 = ((1 + (beta**2)) * precision * recall) / ((beta*precision) + recall) if (precision+recall > 0) else 0.0
-        return {'output': output_map, 'tp':tp, 'fp':fp, 'tn':tn, 'fn':fn, 'precision':precision, 'recall':recall, 'f1':f1, 'f2':f2/(perfect)} 
+        final_score=f2/perfect
+        if precision > 0.8 and recall > 0.8:
+            final_score += 1
+            if precision > 0.95 and recall > 0.95:
+                final_score += 2
+        return {'output': output_map, 'tp':tp, 'fp':fp, 'tn':tn, 'fn':fn, 'precision':precision, 'recall':recall, 'f1':f1, 'f2':final_score} 
     except Exception as e:
         return {'output': None, 'tp':0, 'fp':0, 'tn':0, 'fn':0, 'precision':0, 'recall':0, 'f1':-20, 'f2':-20} 
 
